@@ -1,0 +1,76 @@
+/**
+ * The only server code Lanjut runs. Every page is a static file; this Worker
+ * sits in front of a few paths to relay feedback and find similar issues, serve the contributor list,
+ * pick the visitor's language, forward addresses from older layouts, and
+ * serve the editor page for /editor/<id>. Résumé content never reaches it.
+ */
+import { CONTRIBUTORS_PATH } from "../src/lib/contributors";
+import { SIMILAR_ISSUES_PATH } from "../src/lib/feedback/similar-issues";
+import {
+  appPageFor,
+  legacyTarget,
+  retiredLocaleTarget,
+} from "../src/lib/route-rules";
+import { serveContributors } from "./contributors";
+import { FeedbackError, fileFeedback } from "./feedback";
+import { localeRedirect } from "./locale";
+import { serveSimilarIssues } from "./similar-issues";
+
+export interface Env {
+  ASSETS: { fetch(request: Request): Promise<Response> };
+  GITHUB_ISSUE_TOKEN?: string;
+  TURNSTILE_SECRET_KEY?: string;
+}
+
+async function relayFeedback(request: Request, env: Env) {
+  try {
+    const url = await fileFeedback(request, env);
+    return Response.json({ url }, { status: 201 });
+  } catch (error) {
+    if (error instanceof FeedbackError) {
+      return Response.json({ error: error.message }, { status: error.status });
+    }
+    throw error;
+  }
+}
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    context: { waitUntil(promise: Promise<unknown>): void },
+  ): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === SIMILAR_ISSUES_PATH) {
+      if (request.method !== "GET") {
+        return new Response(null, { status: 405, headers: { Allow: "GET" } });
+      }
+      return serveSimilarIssues(request, env, context);
+    }
+
+    if (url.pathname === CONTRIBUTORS_PATH) {
+      if (request.method !== "GET") {
+        return new Response(null, { status: 405, headers: { Allow: "GET" } });
+      }
+      return serveContributors(request, env, context);
+    }
+
+    if (url.pathname === "/api/feedback") {
+      if (request.method !== "POST") {
+        return new Response(null, { status: 405, headers: { Allow: "POST" } });
+      }
+      return relayFeedback(request, env);
+    }
+
+    const retiredLocale = retiredLocaleTarget(url);
+    if (retiredLocale) return Response.redirect(retiredLocale.href, 308);
+
+    const legacy = legacyTarget(url);
+    if (legacy) return Response.redirect(legacy.href, 301);
+
+    const page = appPageFor(url.pathname);
+    const asset = page ? new Request(new URL(page, url), request) : request;
+    return localeRedirect(request, url) ?? env.ASSETS.fetch(asset);
+  },
+};

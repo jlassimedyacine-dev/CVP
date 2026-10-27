@@ -1,0 +1,39 @@
+---
+import {
+  type Locale,
+  localeStaticPaths,
+  localizePath,
+} from "@lanjut/i18n/routing";
+import { getTranslator } from "@lanjut/i18n/translator";
+import PlatformAppPage from "@/components/platform/platform-app-page.astro";
+import RootLayout from "@/components/shared/root-layout.astro";
+import { CHANGELOG_MARKDOWN_PATHNAME } from "@/lib/changelog-markdown";
+
+export function getStaticPaths() {
+  return localeStaticPaths();
+}
+
+interface Props {
+  locale: Locale;
+}
+
+const locale = Astro.props.locale;
+const pathname = Astro.url.pathname;
+const t = getTranslator(locale, "meta");
+---
+
+<RootLayout
+  locale={locale}
+  title={t("changelogTitle")}
+  description={t("changelogDescription")}
+>
+  <link
+    slot="head"
+    rel="alternate"
+    type="text/markdown"
+    href={localizePath(CHANGELOG_MARKDOWN_PATHNAME, locale)}
+  />
+  {/* The static shell of this page holds the full release history, so
+      crawlers and agents read the changelog in the HTML. */}
+  <PlatformAppPage locale={locale} pathname={pathname} />
+</RootLayout>

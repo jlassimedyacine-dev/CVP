@@ -1,0 +1,278 @@
+# AGENTS.md
+
+## Lanjut -> Resume -> Résumé.
+
+An ATS Builder. Free, Open-Source, local-first resume builder. Customizable presentation layer, constrained structural layer for ATS parseability.
+
+## Repository Layout
+
+A pnpm workspace. Shared tooling (Biome, Prettier, commitlint, lefthook) lives at the root. Each workspace owns its dependencies. A version that more than one workspace uses comes from the `catalog` in `pnpm-workspace.yaml`, so the versions cannot drift apart.
+
+- `apps/web` (`@lanjut/web`): the Astro site, the React app, and the Worker (`worker/`). It builds `dist/` for the web and `dist-desktop/` for the Mac app.
+- `apps/desktop` (`@lanjut/desktop`): the Tauri shell in `src-tauri/`. It loads `apps/web/dist-desktop`.
+- `packages/resume` (`@lanjut/resume`): the résumé document. It holds the types, the schema registry, the migration ladder, the seed, PDF import, JSON and YAML interchange, the IndexedDB layer, and the template registry. Plain TypeScript with no React.
+- `packages/i18n` (`@lanjut/i18n`): the copy (`messages/*.json`) and the routing and translator helpers.
+- `packages/ui` (`@lanjut/ui`): the shadcn primitives, the custom primitives that shadcn does not have (`radio-card`, `code-textarea`, `progress-ring`), `cn`, and `use-mobile`. Import a primitive as `@lanjut/ui/components/<name>`. Only this package imports `@base-ui/react`.
+- `packages/tsconfig` (`@lanjut/tsconfig`): the TypeScript base that the packages extend.
+
+Packages ship TypeScript source, and the app compiles them. A package never imports the app. Inside a package, import its own files by relative path. Across workspaces, import by package name. `apps/web/src/styles/globals.css` lists `packages/ui/src` as a Tailwind `@source`, because Tailwind scans only the app by default.
+
+Run scripts from the repo root. They forward to the workspace that owns them: `pnpm dev`, `pnpm build`, `pnpm desktop:dev`, `pnpm validate:exports`, and `pnpm ui:add <name>`. `pnpm typecheck` checks every workspace.
+
+## Tech Stack
+
+- pnpm workspace (apps and packages, see Repository Layout)
+- Astro (static output; every page is prerendered, React islands carry the interactive parts)
+- astro-seo (the search and share tags in `RootLayout`) and @astrojs/sitemap (the official integration that writes `/sitemap-index.xml`)
+- Cloudflare Workers static assets, plus one small Worker in `apps/web/worker/`. The Worker files feedback (bugs, ideas, and wording fixes) as GitHub issues on `/api/feedback`, searches for similar issues on `/api/feedback/similar` (each query cached at the edge for an hour), serves the repository's contributor list on `/api/contributors` (fetched from GitHub and cached at the edge until 00:00 UTC), sends visitors to their language (except a service worker download, marked with `PRECACHE_HEADER`, which gets each page at its own address), and forwards old addresses. It is the sole server surface and never receives resume content. The desktop app does not call it for contributors: it makes no network call the person did not ask for. The landing page also fetches the list at build time (`contributorsAtBuild` in `apps/web/src/lib/contributors-build.ts`), so its static HTML names every contributor for crawlers. The build reads an optional `GITHUB_TOKEN` through `astro:env` (declared in `astro.config.ts`): CI passes its own, and a local build or `pnpm dev` takes one from `apps/web/.env.local`. Without it, GitHub's anonymous limit of 60 requests an hour applies. A failed request gives an empty list, the row then loads the list in the browser, and the build never fails. Every file under `/_astro/` carries a one-year `immutable` cache (`apps/web/public/_headers`), because its name holds a content hash.
+- A service worker keeps the web app's build files for offline use (`apps/web/service-worker/`, `docs/offline.md`). `astro:build:done` writes `dist/sw.js` with the file list and a content hash per file (`service-worker/build.ts`), and the build fails if an app page is missing from it. Pages load from the network first and fall back to the cache after 5 seconds, hashed files come from the cache first, and the PDF fonts are saved on first use. It never caches `/api/`, never opens IndexedDB, and the app registers it only in a production web build (`PlatformOfflineCache`). Its source has its own `tsconfig.json` with the `WebWorker` library, and `pnpm typecheck` checks it.
+- One dedicated Web Worker does the PDF work (`apps/web/src/components/editor/pdf-worker/`): the export, its warm-up, the PDF import, and the landing page's read-back. takumi-pdf and pdf.js never run on the page, so a PDF never blocks a tap. `runPdfJobInWorker` starts the worker on the first job. Where the worker cannot start, the job runs on the page. A worker cannot share chunks with the page, so its bundle repeats React and the templates. Vite builds it as ES modules with the Tailwind plugin (`worker` in `astro.config.ts`), because the PDF stylesheet imports the compiled app CSS. In `astro dev`, the React Refresh runtime writes to `window` when it loads, and a worker has no `window`. A pnpm patch on `@vitejs/plugin-react` makes it write to `globalThis`.
+- Static desktop build selected by `LANJUT_TARGET=desktop`, written to `apps/web/dist-desktop/`. Tauri packages load only through dynamic imports behind `IS_DESKTOP`, so the web app never runs them.
+- Tauri 2 (desktop shell for macOS; `apps/desktop/src-tauri/`, system webview, loads the static export from disk)
+- use-intl (internationalization; French at `/` and English under `/en`, on web and desktop alike. `packages/i18n/messages/*.json` hold the copy. `@lanjut/i18n` holds the routing helpers and `getTranslator` for `.astro` files. `apps/web/src/i18n/navigation.tsx` holds the `Link`, `useRouter`, and `usePathname` replacements)
+- shadcn (base-ui primitives, Vega style: 36px controls, `rounded-md` on a `1rem` radius)
+- @phosphor-icons/react (icons; `components.json` sets shadcn's `iconLibrary` to `phosphor`, and code imports the `*Icon` names)
+- Tailwind CSS
+- [TipTap](https://tiptap.dev/docs) (rich text editing, restricted extension set). TipTap is the largest library in the app, so it stays off the first paint: editor forms render the lazy `RichTextField`, never `RichTextEditor` directly, and the profile form reaches it through `RichTextField` too. The feedback flow's long answers use it too, with one extra mark: underline. No résumé field enables underline (`PROSE_FEATURES` leaves it out), because the exports do not carry it. Feedback answers become GitHub Markdown on send (`feedback-markdown.ts`), and the flow loads on demand (`platform-feedback-sheet.tsx`).
+- react-hook-form + zod + @hookform/resolvers (forms; every field goes through Controller, schemas in `apps/web/src/lib/forms`)
+- @dnd-kit (section and entry drag-to-reorder)
+- takumi-pdf (PDF export: renders the preview's own HTML and compiled CSS to PDF in the browser, through WebAssembly, in the PDF worker) and docx (.docx export)
+- nextstepjs (guided tour; a pnpm patch drops its Next.js wrapper export, and the tour uses `NextStepReact`). A tour only points: every step sets `disableInteraction`, and `TourProvider` makes the whole page inert while a tour shows, sheets included (`inertOutsideTour` in `apps/web/src/lib/tour-inert.ts`), so a step cannot click or focus its target
+- @lezer/json, @lezer/yaml, and @lezer/highlight (syntax colors for JSON and YAML in `CodeTextarea`; they load with the paste dialog and with the code mode, never on the editor's first paint)
+- comark (reads the Markdown of the code mode; pinned to an exact version, because it is before 1.0; it loads with the first Markdown text, never on the editor's first paint. Its attributes plugin stays off, see `docs/markdown-dialect.md`)
+- motion/react (animation)
+- zustand (in-memory state)
+- IndexedDB via idb (persistence layer)
+- date-fns
+- @mobily/ts-belt (general utilities)
+- Biome (lint and format for code, JSON, and CSS; not ESLint) and Prettier (Markdown and YAML only)
+- commitlint + commitizen (commit message enforcement)
+- lefthook (git hooks: Biome and Prettier on staged files before a commit, commitlint on the message, `pnpm typecheck` before a push)
+- nuqs (per-view search params state)
+- wouter (client routing between the app pages, `/editor`, `/template`, and `/profile`)
+
+@mobily/ts-belt is the single utility library. Do not introduce radash or any second utility library with overlapping purpose.
+
+## Pages and Islands
+
+- Pages live in `apps/web/src/pages/[...lang]/` as `.astro` files. `localeStaticPaths` emits each page once per locale.
+- Search: canonical links, hreflang, and the sitemap name a page by `publicPath` (`apps/web/src/lib/seo.ts`), because `build.format: "preserve"` reports `/feedback.html` and `/en/`, which the asset server redirects. `INDEXED_PATHS` lists the indexable pages; the @astrojs/sitemap integration (`astro.config.ts`, web build only) filters by it and writes one entry per page and language with its alternates and `x-default`, and every other page sets `noindex`. `RootLayout` renders the title, description, robots, canonical, hreflang, Open Graph, and Twitter tags through astro-seo's `SEO` component. Always pass it `canonical` (or `null` on a `noindex` page): its default comes from `Astro.url`, which names the `.html` file. `robots.txt` blocks only `/api/`: a page with `noindex` must stay crawlable, or a crawler never reads the tag. The home page's JSON-LD graph (`structured-data.ts`) holds `WebSite` (the name a search result shows), the application with its author and contributors, and an `FAQPage` built from `FAQ_KEYS`, the same list the landing FAQ renders. The landing footer links the other language with a plain `<a>`, because the language menu reloads through a cookie that crawlers cannot follow. `public/llms.txt` states the product facts for AI agents; keep it true when a fact changes. The changelog is also Markdown for agents: `[...lang]/changelog.md.ts` writes `/changelog.md` and `/en/changelog.md` from the same copy (`changelog-markdown.ts`), and the changelog page links it with `<link rel="alternate" type="text/markdown">`.
+- An application page renders one React island root: `PlatformApp` at `/editor`, `/template`, `/profile`, and `/changelog`, and `FeedbackPage` at `/feedback`. The root wraps its content in `AppProviders`.
+- `/editor`, `/template`, `/profile`, and `/changelog` load client-only (`client:only="react"`). They read everything from IndexedDB, so a hydration step would add nothing. Until the app mounts, each page shows a static shell: `PlatformAppStatic`, rendered at build time, which is the shell around the skeleton of the page (`PAGE_SKELETONS`), or around the changelog itself. It loads no page code and reads no storage. `platform-app-page.astro` writes the island and the static shell side by side, and `PlatformApp` removes the static shell in a layout effect, before its own first paint. The static shell is not the island's `fallback` slot, because Astro writes a slot into the page twice (once to show it, once as a `<template>` for the component). `/editor` and `/template` are indexed by their static title and description (and `PAGE_TITLE_KEYS` keeps those titles after load), and their static shell gives crawlers the page's real text, such as the template names and descriptions; `/profile` is `noindex`. `/feedback` still renders on the server. The static HTML of `/changelog` holds the full release history for crawlers and agents. `AppProviders` gives wouter `publicPath(pathname)` as `ssrPath`, because the build reports `/changelog.html`.
+- One file answers `/editor` and every `/editor/<id>`, so `editor.astro` writes two static shells, one for each route. The head script (`preferences.js`) names the route on `<html>` (`data-workspace`), and `globals.css` keeps the other shell out, before the first paint. The two shells repeat their ids until the app mounts. The Mac app's root file serves every route in both languages, so it keeps the full-page `PlatformLoading`.
+- The static shell cannot know what is in storage. The head script (`preferences.js`) reads the two saved values that change its layout, before the first paint. The first is a collapsed sidebar. The static shell holds the sidebar expanded, and the icon rail is CSS on two attributes of the sidebar (`data-state`, `data-collapsible`), so the head script sets them as the parser adds the sidebar. `useSidebarStore` starts from the same mark on `<html>` (`data-sidebar`), so the first render of the app is the same picture. The second is the number of rows in the Recent list. `PlatformLibraryMemory` saves it from the shell (`saveRecentRows` in `apps/web/src/lib/recent-rows.ts`), because a phone mounts the sidebar only while its sheet is open. The head script marks the number on `<html>` (`data-recent`), and `globals.css` gives two loading states their shape from it. The Recent list keeps that many loading rows, so the groups under it do not move, and it stays out with no number, as it does with no résumé. The library skeleton holds both of its first blocks until the résumés are counted (`PlatformLibraryUncountedSkeleton`): the continue card shows for 1 or more, and the empty state for 0 and for no number. That empty state keeps its room and shows no message (`scope="unknown"`), because the shell cannot say that nothing is saved. A part that shows saved state asks `useIsStaticShell` and waits for the app, as the Changelog dot does. The avatar is the guest's until the app mounts. Keep the static shell free of anything that reads storage. The release data is `CHANGELOG` in `apps/web/src/lib/changelog.ts`, with each version's highlights in the `platform.changelog.entries` messages.
+- Landing sections are `.astro` components in `apps/web/src/components/landing/`. Only the parts that need JavaScript are React islands: the navbar theme toggle and settings menu, the hero's two-readers sheet (the live résumé beside the text a PDF extractor reads back from it), the template picker, the FAQ accordion, the closing actions, and the contributors row in the close. The contributors row renders the build-time list on the server, then refreshes from `/api/contributors` when it comes into view, and keeps the build-time list if that request fails. Each face is a plain `<img>` over the initial, not `AvatarImage`, because base-ui renders its image only after the browser loads it, so the static page would carry no faces. Each face link carries the name as visually hidden text, not as an `aria-label`. The landing page has its own scoped tokens and faces (`[data-world="readers"]` in `globals.css`, set on `<body>` through the `world` prop of `RootLayout`), so the app keeps its own look. An island that reads copy wraps itself in `IslandProviders`, which carries only the namespaces in `ISLAND_NAMESPACES` (`packages/i18n/src/island-messages.ts`). The `islandMessages` Vite plugin (`apps/web/src/i18n/island-messages-plugin.ts`) writes them as a module of their own, because the app imports each catalog whole and a bundler never splits one module between chunks. An island that reads another namespace adds it there. The app roots wrap themselves in `AppProviders`, with all the copy. Static sections take their copy from `getTranslator`. The hero sheet and the template picker draw their résumés in the static HTML: `ResumeThumbnail` scales with CSS alone, and an off-screen thumbnail skips layout (`content-visibility: auto`). The résumé font faces come in after hydration (`useHydrated`), so the static page starts no TTF download before its first paint.
+- Primitives with built-in labels (the Dialog and Sheet close button, `SidebarTrigger`, `Spinner`, `Breadcrumb`) read them from the `ui` messages namespace, so they render only inside an island that wraps `IslandProviders`. `ResumePage` takes its label as a prop instead, because the landing page renders it with no provider.
+- Each island is its own React root. React context does not cross islands, so each root carries its own providers. Module state does cross them: islands on one page share the same zustand stores.
+- The app pages (`/editor`, `/template`, `/profile`, `/changelog`) share one island root, `PlatformApp`. wouter routes between them under a `<Router base>` set to the locale prefix, so the shell stays mounted and only the content swaps. Each content view loads lazily inside its own `Suspense` boundary, whose fallback is a skeleton of that page (`PAGE_SKELETONS` in `platform-app.tsx`), so a move between pages never shows a full-page loader. A document load shows the static shell, which uses these same skeletons. The changelog is the one exception: it ships with the app and has no boundary, because React 19.2 writes a large boundary into a hidden block that a script reveals, and a crawler that runs no script reads that block as hidden. A page skeleton reuses the loading state that the page shows next (`PlatformLibrarySkeleton`, `EditorPreviewSkeleton`, `EditorSectionListSkeleton`). A skeleton renders for real every part that needs no data (headings, start tiles, toolbars, template names and descriptions), takes the shape the data will give when the store already knows it (the library's résumé count and view), and shows a loading résumé page as `PlatformPaperSkeleton`, white paper with faint lines, never as a grey block. If a page layout changes, change its skeleton in the same PR. `useEditorId` reads the id from wouter's `/editor/:id` route, so every component sees the same location. nuqs keeps only per-view query state (search boxes, the library sort, the chosen template, the chosen profile, the create sheet, feedback params). Those views remount per route, so they read the URL afresh. Every other page change, including a language switch, is a full document load. `Link` and `useRouter` from `@/i18n/navigation` pick the right kind of move through `AppRouterContext`, and flush the pending résumé write first either way. State that must survive a document load lives in IndexedDB or in a zustand `persist` store.
+- The shell is the shadcn inset sidebar, collapsible to icons on desktop, restyled from `md`: the navbar sits on the shell beside the sidebar, and the page is a panel rounded only at its top-left, flush with the window's right and bottom edges. The page under the navbar fills a fixed-height grid track: the library and the template page scroll inside `PlatformPageScroll`, and the editor fills the track. The window does not scroll, so code that must move a page to the top calls `scrollPageToTop` from `apps/web/src/lib/page-scroll.ts`, not `window.scrollTo`.
+- The workspace lives under `/editor`: `/editor` is the résumé library and `/editor/<id>` opens that résumé in the editor. The templates page is `/template`, and the profiles page is `/profile`. `EDITOR_PATHNAME`, `EDITOR_DOCUMENT_ROUTE`, `TEMPLATE_PATHNAME`, `PROFILE_PATHNAME`, `editorHref`, and `useEditorId` own these addresses, and `useWorkspaceView` says which half of the workspace shows. No file exists per résumé, so every environment answers `/editor/<id>` with the editor page: the Worker fetches that asset and keeps the URL, `astro dev` rewrites the request in a Vite plugin in `astro.config.ts`, and the desktop build's root `index.html` boots the app (see Desktop shell). Older addresses forward in one 301 that keeps the rest of the query: `/platform`, `/platform/template`, `/platform/editor/<id>`, `/platform/editor?id=<id>`, and `/editor?id=<id>`. `legacyTarget` and `appPageFor` in `apps/web/src/lib/route-rules.ts` hold both rules, for the Worker and the dev server alike.
+
+## Architecture Rule: Two Layers
+
+1. Structural layer. Fixed section types (header, summary, experience, internship, projects, organizations, education, certifications, skills, languages, plus custom sections from an approved variant list). The canonical type order and per-type field schemas live in `packages/resume/src/schema-registry.ts`. Each field has a restricted TipTap schema: bold, italic, bullet list, ordered list, link. No tables, no multi-column layout, no text boxes, no inline images, no custom heading levels beyond what the section template defines.
+
+2. Presentation layer. Typography, spacing, color, accent styles, section visual ordering. Fully customizable. Must never alter the underlying linear text structure used for parsing or export.
+
+Feedback has one shape in three places: `createFeedbackReportSchema` (`apps/web/src/lib/feedback/feedback-schema.ts`) validates a report in the form and again in the Worker, and `buildFeedbackIssue` writes the same issue for the Worker, the in-app preview, and the prefilled GitHub fallback. A report never carries résumé text; its technical details (app version, browser, system, page, and in the editor the template, font, and résumé language) are shown before sending and can be left out. Keep the `.github/ISSUE_TEMPLATE` forms in step with the areas and fields.
+
+Any feature request that adds structural freedom (tables, columns, floating elements, decorative icons in text runs) is out of scope unless it is presentation-only and degrades gracefully to plain text in export.
+
+The one shipped example of that carve-out is the opt-in header photo: off by default, stored as a downscaled data URL on `header.photo`, rendered by each template's header (never absolutely positioned), embedded in PDF and DOCX, ignored by TXT. `apps/web/scripts/validate-exports.ts` enforces that adding a photo never changes the extracted text of any export.
+
+## Data and Storage
+
+- zustand holds working state, synced to IndexedDB on change (debounced).
+- No resume content is sent to any server, API route, or Worker. Confirm this on every PR touching data flow.
+- Document shape is versioned by the in-document `schemaVersion` plus a forward-only, read-time migration ladder (`packages/resume/src/migrations.ts`, with the steps in the `migrations-v*.ts` range files beside it). Ship the shape change, the `CURRENT_SCHEMA_VERSION` bump, and the ladder rung in the same PR. Full reference: `docs/schema-migrations.md`.
+- The IndexedDB `DB_VERSION` is separate and governs object stores/indexes only. Never bump it for a field-shape change; never reshape documents inside the idb `upgrade` callback. A bump waits for tabs on the older build to close; `getDb` reports the wait and the hand-over on `DB_EVENTS`, and `PlatformDatabaseNotice` tells the person (see `docs/schema-migrations.md`).
+- One window edits a résumé or a profile at a time (`docs/multi-window.md`). The window that holds the item's Web Lock edits it (`useEditLock`), and another window that has it open is frozen under `EditLockFrame` until its person presses "Edit here". Windows tell each other what they saved or deleted over one `BroadcastChannel` (`window-channel.ts`, ids only, never content), and each write goes through `announced-writes.ts` so the other windows' lists follow.
+- Each résumé and profile carries a `revision`, the count of its writes. A write expects the revision this window read or last wrote, and `writeRevised` refuses it in the same transaction when another window wrote or deleted the item first. The editor and the profile page then ask which version to keep (`ConflictDialog`). Writes of the open résumé run one at a time (`queueOpenWrite`). See `docs/schema-migrations.md`.
+- A write never replaces a stored résumé with a newer `schemaVersion`: `putResume` reads it in the same transaction and returns `R.makeError("newer-schema")`, and the editor asks for a refresh. An old tab must not save a downgraded document over one that a newer tab migrated.
+- Migration steps must be bail-safe: when a document does not match the expected shape, keep the original data and no-op; never blank or replace what cannot be parsed.
+- Readiness (`packages/resume/src/readiness.ts`) is derived from the open document on each change and never stored. A check passes only on the person's own words: `readiness-sample.ts` tells the sample's text from theirs by group (the header, an entry, a list), never by one short value alone.
+- Raw pre-migration documents are snapshotted to the `backups` object store before migration. Documents that fail migration are surfaced as unreadable in the UI and are never deleted or overwritten.
+- Profiles are workspaces (`packages/resume/src/profile.ts`). A profile holds personal information and a summary in the `profiles` object store, and the active profile id lives in the `app` store. Each résumé belongs to one profile through its optional `profileId`. A résumé with no `profileId`, or with one that no longer exists, belongs to the first profile (`resolveResumeProfileId`). The library, Recent, and the template page's "Preview with" show only the active profile's résumés (`useProfileResumes`). A new résumé joins the active profile, and a Sample or Blank start takes its header and summary from it (`applyProfile`); an import keeps the file's own. Deleting a profile first moves its résumés to another profile (`moveToProfile`, which keeps `updatedAt`), and the last profile cannot be deleted. `profileId` is organization only: it never renders and never exports. A profile's `header` has the résumé header's shape, so a change to `HEADER_SCHEMA` must also carry existing profiles. With none saved, an in-memory guest stands in; adding a profile saves the guest, so its résumés keep a profile.
+- A profile backup (`packages/resume/src/backup/`) moves one profile and its résumés to another device as one compact JSON file, `<name>.lanjut.json` (format `lanjut-profile`, version 1). Each résumé is its interchange document beside the `id`, `createdAt`, and `updatedAt` that the interchange leaves out, and each distinct photo is stored once and referenced by key. `parseProfileBackup` refuses anything short of a complete, valid file, and `planProfileImport` merges by id: a résumé the device lacks is added, a newer copy in the file replaces the device's, and nothing is ever deleted. Before an import, résumés with no known profile are pinned to the profile they show under, because an imported profile can be older than the device's first one. Share hands the same JSON to the share sheet named `.lanjut.txt`, because Chrome refuses to share JSON files even when `canShare` says yes; the import takes either name and reads the content. The file goes only where the person sends it; no server is involved.
+
+## Code mode
+
+- Developer mode is a preference that is off by default (`useDeveloperModeStore`, persisted, with a switch in Preferences). With it on, the editor shows a Form/Code switch (`EditorModeSwitch`). `useEditorMode` gives the mode that shows, so the code mode never shows with Developer mode off.
+- The switch is never in the navbar: the navbar holds nothing that only the editor uses. It is the first item of the bar at the top left of the editor: the preview bar in the forms (`lead` of `EditorPreviewScroll`), and `EditorCodeToolbar` in the code mode. Nothing that changes width comes before it, so it does not move.
+- The code mode (`apps/web/src/components/editor/editor-code/`) shows the open résumé as Markdown, YAML, or JSON in three views: code, split (the code on the left, the page on the right), and preview. Below `xl` a split has no room, so it shows as the code alone. The format and the view are persisted. The mode is in memory, so a document load opens the forms and the page skeletons stay as they are.
+- Markdown is the first format, and it holds the header and the sections only (`docs/markdown-dialect.md`). `resume-md-write.ts` writes it, `resume-md-read.ts` reads it from the nodes that comark gives (`resume-md-nodes.ts`), and `resume-md-schema.ts` holds the rules that the two share. YAML and JSON are the interchange document, so they hold the settings too.
+- No section form is mounted in the code mode, so the text is the only writer. `editCode` shows each keystroke at once and then reads the text with `applyCodeText` (`packages/resume/src/interchange/code-edit.ts`), which is asynchronous because comark is. A valid text goes through `updateOpen`, and the page follows it. A text with an error never reaches the résumé: it stays as a draft in `useEditorCodeStore`, and the line under the code says why. Only the read of the latest text is applied (`commit` in `edit-code.ts`).
+- The text of a résumé must read back as that same résumé. If it does not, the first keystroke changes text that the person did not touch. `pnpm validate:exports` checks this for Markdown on the sample and on a hard case (`apps/web/scripts/markdown-checks.ts`). Keep the writer and the reader in step.
+- The text leaves the photo out, because a data URL is too long to edit. In YAML and JSON, a setting that the text leaves out goes back to its default, as in an import. The title, the template, the language, and the photo stay.
+- A parsed document takes the ids of the sections and entries that it replaces (`withSectionIds`), because the preview measures and animates its blocks by id.
+- A draft belongs to the résumé object that it was read against (`liveDraft`). Any other write (undo, the section order, another window) makes a new object, and the code then shows the résumé again. An action that drops a draft with an error asks first (`runAfterCodeGuard`, `EditorCodeDiscard`): a format change, the switch back to Form, and a readiness jump.
+- The parsers and the syntax colors load with the code (`EditorCodeInput` is lazy), and comark loads with the first Markdown text (`readMarkdown`). Keep them out of the editor's first load.
+- Tab and Shift+Tab change the indent in the code (`useCodeKeys`, with the pure rules in `indent.ts`). The edit goes through `document.execCommand`, which TypeScript marks as deprecated: it is the one call that changes a text field and keeps its undo history, so Cmd+Z still goes back through an indent. `setRangeText` alone cuts that history. Escape gives the next Tab back to the browser, so the keyboard can always leave the field, and the line under the code says so.
+
+## Desktop shell
+
+- `apps/desktop/src-tauri/tauri.conf.json` holds three values that must never change. `identifier`
+  (`com.rimzzlabs.lanjut`) keys the webview data directory, and with it every user's
+  IndexedDB. `useHttpsScheme` (`false`) sets the app's origin on Windows
+  (`http://tauri.localhost`), and IndexedDB is kept per origin, so a flip moves that same
+  storage. Changing either orphans the résumés of everyone who already installed the app.
+  `bundle.windows.wix.upgradeCode` is pinned to Tauri's default for the name Lanjut. An MSI
+  matches an update to the installed app by it, so a new code installs a second copy.
+  `.github/scripts/check-tauri-config.mjs` fails CI when any of the three changes.
+- The window opens on `/editor`. Tauri falls back from `<path>` to `<path>.html`,
+  then to `<path>/index.html`, then to the root `index.html`, so links need no
+  trailing slash. `/editor/<id>` has no file, so a reload lands on the root file.
+  The desktop build therefore renders the app there (`PlatformDesktopRoot`), not the
+  landing page, and reads the language and route from the address. The desktop
+  window never shows the landing page.
+- `dangerousDisableAssetCspModification` lists `style-src` and must keep listing it.
+  Tauri appends a hash source to every directive it manages. A `style-src` that
+  carries a hash makes the browser ignore `'unsafe-inline'`. The app then drops every
+  `style` attribute in the exported HTML, and that includes the `--sidebar-width` that
+  carries the whole platform layout. A static build cannot nonce those attributes, so
+  the two cannot both hold. `script-src` keeps its injection, which is the
+  directive that stops script execution.
+- Every file the app hands to a user goes through `triggerDownload` in
+  `apps/web/src/components/editor/download-file.ts`. A new export format that builds its own
+  anchor will work on the web and do nothing at all in the desktop app. The function
+  resolves false when the user cancels the save dialog, which is not an error.
+- The app requires macOS 13 (`bundle.macOS.minimumSystemVersion`). PDF export runs takumi-pdf's WebAssembly, which the CSP allows through `'wasm-unsafe-eval'` in `script-src`, and WebKit honors that keyword only from Safari 16, which macOS 13 ships. Lowering the minimum breaks PDF export on older systems.
+- macOS is the only shipped desktop target. `bundle.targets` also lists the Windows
+  installers (NSIS, MSI) and the Linux packages (AppImage, `.deb`, `.rpm`). Tauri builds
+  only the targets of the system it runs on, so the Mac build still makes `.app` and
+  `.dmg`. The release builds macOS only. Windows (x64, ARM64) and Linux (x64, ARM64)
+  build on demand for testing. Do not describe them as supported until they pass the
+  test checklist on real machines and ship. They ship together as 1.0.0: that PR adds
+  them to the release matrix and to `PLATFORMS`, and its description carries
+  `Release-As: 1.0.0`.
+- WiX makes no ARM64 MSI, so Windows ARM64 builds the NSIS installer only
+  (`--bundles nsis`). Linux builds on `ubuntu-22.04`, the oldest Ubuntu supported,
+  because a Linux build runs only on a glibc as new as the one it was built against.
+- A tagged release publishes one `.dmg` per architecture. The build is unsigned, so
+  macOS refuses to open it until the quarantine attribute is cleared. That is a paid
+  Apple membership away from being fixed, not a code change.
+- The updater verifies a signature. The public key lives in `tauri.conf.json` and the
+  private key lives only in the `TAURI_SIGNING_PRIVATE_KEY` repository secret. When the
+  two keys do not match, `tauri build` only prints a warning and the build still
+  passes. A wrong pair then fails silently at runtime, and every update check
+  quietly does nothing.
+- `bundle.targets` must keep `app` beside `dmg`. On macOS the updater ships the `.app`
+  bundle as a signed tarball, and a `dmg` alone builds no such artifact. The release
+  then carries no `latest.json`, every update check reads a 404, and the failure is
+  silent by design. The 0.17.0 release shipped this way.
+- release-please cuts every release as a draft, with its tag created at once
+  (`draft` and `force-tag-creation` in `release-please-config.json`). The `publish`
+  job makes it public only after both desktop builds pass. A failed build therefore
+  leaves a hidden draft, and `releases/latest`, which the download button and every
+  installed updater read, stays on the last complete release.
+- Nothing `tauri-action` reports can fail a release on its own. It warns and carries
+  on when it builds no updater artifact, and again when it finds no signature. Each
+  architecture also merges its own entry into the one `latest.json`, so two builds
+  that finish together can drop an entry. The `publish` job reads the manifest off
+  the draft and confirms it signs every architecture before the release goes public
+  (`.github/scripts/check-update-manifest.mjs`). Keep its `PLATFORMS` list in step
+  with the desktop matrix.
+- Repair a failed release with `gh run rerun --failed <run-id>`. That runs the failed
+  jobs again inside the original run, runs `publish` after them, and updates the
+  checks the run already wrote. A `workflow_dispatch` starts a separate run instead,
+  and GitHub adds those checks beside the old ones rather than replacing them, so the
+  commit stays red even after the assets arrive. The 0.17.1 release reads that way.
+  Keep the `tag` input for a run that is too old to repeat.
+- Pull requests do not build the desktop app, because the desktop builds are the
+  slowest checks. The Desktop workflow (`.github/workflows/desktop.yml`) builds the shell
+  on macOS, Windows, and Linux on `main` after each merge, except a release merge. On
+  demand (`gh workflow run desktop.yml --ref <branch>`), its `installers` job bundles all
+  six targets and attaches the installers to the run for seven days. They carry no
+  update signature, so they need no secret and the updater never offers them.
+- An update check is a network call the user did not ask for. It runs at most once
+  every three days, a failure is silent, and nothing installs without a click.
+- Biome ignores `apps/desktop/src-tauri`. Rust is formatted by `cargo fmt`, and the JSON config files
+  are written by the Tauri CLI.
+
+## Reordering
+
+- Section reordering (drag-to-reorder via @dnd-kit, `reorderSections` in the store) changes ordering metadata only. It does not alter content schema. Summary is pinned below the Header and does not participate; every other section type is reorderable (`REORDERABLE_SECTION_TYPES` in `packages/resume/src/schema-registry.ts`). Entries within a section are not manually reordered; they sort by date.
+- The Section order menu applies a whole order in one undoable step (`applySectionOrder`): `experience-first`, the canonical order, or `skills-first`, which moves Skills directly below the Summary (`SECTION_ORDER_PRESETS`). Like a drag, it changes ordering metadata only, and entries keep their date order. A request for a non-chronological résumé gets skills first, never entries out of date order.
+
+## Export
+
+- PDF export must preserve linear reading order. Do not use a method that achieves visual layout via absolute positioning that breaks text extraction order. Verify with a text-extraction test (e.g., pdftotext) after any change to the PDF generation path.
+- Every PDF names its template in the creator field (`Lanjut (ketat)`, `pdfCreator` in `packages/resume/src/pdf-source.ts`), and never anything about the person. The PDF importer reads it to know the layout: Ketat prints dates on the subject line under the title (`DATES_ON_SUBJECT` in `parse-entry-fields.ts`). `validate:exports` imports the sample back from each template's PDF, so a template change that the importer cannot read fails there.
+- Provide a plain text or .docx export path in addition to PDF. This is the actual ATS-safe submission format for many applicant tracking systems.
+- Before marking export work done, run output through at least one real parser test (Workday/Greenhouse test upload, or an open-source resume parser) and confirm fields map correctly.
+- Entry blocks (experience, education, certificate, and the internship/projects/organizations and custom `list` sections that reuse the experience kind) must never split across a page break; their title, subtitle, and body stay on one page, matching the on-screen paginator which never splits a block. `isAtomicBlock` in `apps/web/src/components/editor/resume-blocks.ts` is the source of truth. `TakumiResumeFlow` marks atomic blocks with `data-atomic`, and the PDF stylesheet gives them `break-inside: avoid`. A section heading stays with its first entry the same way: the flow wraps each `keepWithNext` run (from `groupBlocks` in `resume-paginate.ts`) in one `data-keep` group, because takumi-pdf ignores `break-after: avoid`.
+- Keep an entry's first bullet within 1.4 line heights of the line above it. Parsers such as OpenResume start a new entry at a larger gap, and the entry then loses its description. The experience items use `mt-1` above the description for this reason.
+- The PDF comes from the preview's own templates (`apps/web/src/components/editor/takumi/`), so a template change shows in the preview and the PDF at once. takumi-pdf 0.15 has gaps that `takumi-css.ts` works around: it draws solid borders only (dotted and dashed rules are drawn as a repeated SVG background under a transparent border), it drops a `var()` with whitespace inside its parentheses (the stylesheet is compacted), it strokes the 700 face to fake weights above it (`font-extrabold` and `font-black` are held at 700, as a browser renders them with the catalog fonts), it drops `:where()` selectors and the `margin-block-end` longhand (every `space-y-*` utility is restated as a bottom margin), it writes a CSS list marker after the item's text (the flow sets `TextListMarkersContext`, so `ResumeRichText` writes a "•" or number before each item), letter spacing splits words for parsers (template tracking is reset in the PDF), and no résumé font has a square glyph (square bullets are set in `SquareBullet.ttf`, a font whose "•" is a square, built by `apps/web/scripts/build-square-bullet-font.py`, so the marker stays visible text with no image or hidden glyph). Check a new template style against these before relying on it. The export loads only the font families its template draws with (`TEMPLATE_FAMILIES` in `takumi-fonts.ts`), and the download dialogs and the Document tab warm the renderer and those fonts before the click (`preloadPdfExport`). Both run in the PDF worker.
+
+## Documentation
+
+- Docs are part of the change, not a follow-up. So is the changelog entry (see Changelog). Before opening a PR, check whether the change makes any of these stale and update the affected ones in the same PR:
+  - `README.md`: user-facing features, template list, tech stack table, scripts.
+  - `AGENTS.md`: tech stack, section types, architecture rules, conventions.
+  - `design.md`: design system, tokens, routes, page-type families.
+  - `docs/schema-migrations.md`: any document-shape or `DB_VERSION` change.
+  - `docs/export-validation.md`: any change to the PDF/docx/txt export path.
+  - `docs/offline.md`: any change to the service worker, the files it keeps, or its rules.
+  - `docs/multi-window.md`: any change to the edit lock, the messages between windows, or the revision check.
+  - `docs/markdown-dialect.md`: any change to the Markdown of the code mode: a label, a heading rule, an escape, or a downgrade.
+  - `apps/web/FONTS.md` and `apps/web/public/fonts/OFL.txt`: any font that is added, removed, or updated, in `public/` or in the Astro `fonts` config. A family with a Reserved Font Name ships as its unmodified upstream files, never as a subset (`FONTS.md` says why).
+- Common triggers: adding or removing a dependency (tech stack lists), a new section type or field shape (section-type lists), a new user-facing capability (README features), a new script (scripts tables), a new route or server surface (`design.md`, the data-flow rule).
+- Verify every documented claim against the code before writing it. Describe what ships, not intended behavior. A doc that overstates the product is worse than a missing line.
+
+## Changelog
+
+- The changelog entry is part of the change, like the docs. A PR whose title release-please releases (`feat`, `fix`, `perf`, or a breaking `!`) adds its entry in the same PR. If you cannot tell whether people who use Lanjut will notice the change, ask before you open the PR.
+- The entry goes under the version that the next release will carry. Take the version in `.release-please-manifest.json` and apply the highest change merged since its tag, this PR included: breaking is major, `feat` is minor, `fix` and `perf` are patch. If a later PR raises the bump, that PR renames the key.
+- Add `{ version, date }` at the top of `CHANGELOG` in `apps/web/src/lib/changelog.ts`, and the highlights to `platform.changelog.entries.<x_y_z>` in both `packages/i18n/messages/en.json` and `fr.json`. Use the date the PR merges. After the release, set it to the tag date if the two differ.
+- Write one highlight per feature, for people who do not code. Fold every fix in a release into one "Bug fixes" entry. Write the French copy in the app's friendly voice.
+- A `Release-As: x.y.z` line in the PR description makes release-please cut exactly that version, because GitHub writes the description into the squash commit's body. The check reads it too.
+- A `chore`, `docs`, `ci`, or `refactor` PR makes no release. An entry that such a PR adds goes live only with the next release, or with `pnpm ship`.
+- The Changelog workflow runs `.github/scripts/check-changelog.mjs` on every PR. It fails a releasing PR that adds no entry for the next version in both languages. It also fails any PR whose changelog lists a version that is neither a tag nor the next release. A change that nobody can see takes the `no-changelog` label. Run the check before you open a PR: `TITLE="<pr title>" node .github/scripts/check-changelog.mjs`.
+
+## Commits
+
+- Use commitizen format via commitlint config. Do not bypass with --no-verify.
+- lefthook runs Biome and Prettier on staged files before each commit, commitlint on the message, and `pnpm typecheck` before each push. Do not commit with failing lint or format checks.
+
+## Build Order (do not reorder without reason)
+
+1. Resume data schema + IndexedDB layer
+2. zustand store wired to persistence
+3. TipTap fields with restricted schemas
+4. Presentation layer (themes, typography, spacing)
+5. Export pipeline (PDF, then docx/txt)
+6. Parser validation pass
+
+## Non-Goals
+
+- No backend account system. No server-side storage of resume content.
+- No structural customization that compromises ATS parseability, regardless of how the request is framed (templates, themes, layouts).
+- No second utility library duplicating @mobily/ts-belt.
+
+## Code Conventions
+
+- TypeScript strict mode on.
+- No `any` without inline justification comment.
+- Components live in `apps/web/src/components/<domain-name>/*`, grouped by their domain (e.g. `apps/web/src/components/landing/landing-hero.astro`). Never a global `components/` dump by type, and never colocated under `apps/web/src/pages/` route folders.
+- Shared non-primitive components (used across domains, but not base UI primitives) live in `apps/web/src/components/shared/*`.
+- Shared UI primitives only in the shadcn-managed `packages/ui/src/components` directory.
+- The primitives carry local edits that `shadcn add --overwrite` erases: labels from the `ui` messages namespace (dialog, sheet, sidebar, spinner, breadcrumb), the `color-mix` primary hover on the button and the badge, the slider value bubble, the `Input` guard for an `undefined` value, the required asterisk on `FieldLabel`, the toggle `xs` size, the boxed `Accordion`, and the Biome suppressions. Diff against git and restore them after a re-add. The CLI also writes `import { cn } from "cn"` and adds a `cn` package: point the import at `@/lib/utils` and drop the package.
+- `apps/web` never imports `@base-ui/react`. Use the shadcn primitive from `@lanjut/ui`, restyled through `className` if necessary. If shadcn has no such primitive, add a custom one to `packages/ui/src/components`.
+- Compose the existing primitives in `packages/ui/src/components`; do not hand-roll their equivalents. A callout or notice is an `Alert`, a scrollable region is a `ScrollArea`, and so on. Never reach for raw markup (a bare `<p>` plus link) or a native `overflow-y-auto` when a primitive already covers it. Note: base-ui's `ScrollArea` only scrolls when its Root has a definite height (an explicit height, or a grid track); a `flex-1` used size is not enough.
+- No comments restating what code does. Comment only on complex logic where intent is not recoverable from reading the code (e.g., a non-obvious mathematical computation, a workaround for a library bug, a non-standard algorithm).
+- Do not reach for `useEffect` as a default tool for state synchronization, computed values, or event response. Before adding a `useEffect`, check whether the case matches one of the patterns in https://react.dev/learn/you-might-not-need-an-effect. Valid `useEffect` use is limited to synchronizing with an external system (IndexedDB writes, subscriptions, third-party widget instances). Derived state belongs in render or in zustand selectors, not in an effect that copies state into state.
+- Separate components by concern. A list is not one component. Split into list container, list item, and item-internal pieces as separate components, each in its own file or clearly separated block. Do not collapse a list and its item rendering logic into a single component body.
+- Never destructure in a parameter list, including library callbacks (react-hook-form `render`, TipTap). Name the parameter (`props`, `controller`, `context`) and destructure on the first line of the body.
+- Props destructuring is capped at 3 fields. If a component needs more than 3 fields from props, do not destructure, access fields directly via `props.fieldName`. This applies above the 3-field threshold only, not below it.
+- No default exports for function components or utility functions. All exports are named.
+- Data transforms on arrays and strings go through ts-belt: `pipe(value, A.map(...), A.filter(...), A.join(", "))` with its modules (`A`, `S`, `N`, `O`, `R`, `G`, `D`, `F`). Do not mix ts-belt and native methods in one flow. JSX list rendering (`{items.map(...)}`) stays native. Keep a native call only where ts-belt has no equivalent (a callback replacer, `localeCompare`) or where a hot loop needs it.
+- ts-belt returns `ReadonlyArray`, and the résumé model follows it (`Resume.sections`, `Section.entries`). Replace an array instead of mutating it (`A.append`, `A.reject`, `A.sort`). Use `F.toMutable` only at a library boundary that needs a mutable array: react-hook-form field arrays, TipTap `JSONContent`, zod-inferred types, nextstepjs, takumi-pdf. Never enable `Belt.UseMutableArrays`.
+- Index and length go through ts-belt too: `A.get`, `A.head`, `A.last`, `S.get`, `A.length`, `A.isEmpty`, `S.isEmpty`. Their `Option` results are handled with `O` (`O.isNone` early exits, `O.getWithDefault`, `O.mapWithDefault`, `O.match`, `O.flatMap`), not with `??`, `?.`, truthiness, or `G.isNullable`. Values that are nullable for other reasons (optional props, DOM lookups, library results) stay as they are.
+- In this ts-belt release only `undefined` is None at runtime: `null` counts as Some, and `O.map` boxes an `undefined` result. Do not feed `O` an array that can hold `null`, and use `O.mapWithDefault`, `O.match`, or `O.flatMap` when a mapper can return `undefined`.
+- Do not mutate data. No property or element assignment, no `push`/`splice`/`sort`/`reverse`/`fill`, no `delete`, no accumulator loops. Build with literals, spread, and ts-belt (`A.append`, `A.updateAt`, `D.set`, `D.merge`, `D.deleteKey`), and return the new value. The store's `updateOpen` takes a pure `(resume) => Resume`; returning the same object is a no-op (no undo step, no save). Use `updateSections`, `updateSectionById`, and `updateSectionOfType` from `@/lib/resume` for section changes. DOM and browser objects, refs, and library APIs built on mutation are the only exceptions.
+- Ternaries are for short, one-line values only (`const label = open ? t("close") : t("open")`, or a one-line JSX swap such as `{busy ? <Spinner /> : <Icon />}`). No nested, multi-line, or array/object-literal ternaries: use an early return, `O.match`, a `Record` lookup, `&&`, or a small function or component.
+- Frontend code returns errors as values with ts-belt `R` (`R.makeOk`, `R.makeError`, `R.match`), as `runMigrations` and `runParserProof` do. The one throw is `getDb` in `packages/resume/src/db/schema.ts`: it guards the persistence boundary, where every IndexedDB call already fails by rejecting.
+- Editor forms change their columns on the width of their own `FieldGroup`, a named container (`@md/field-group:grid-cols-2`), never on a viewport breakpoint such as `2xl:`. The side panel keeps a width in rem and the person can drag it, so the window width says nothing about the room a form has.
+- Keep files under 600 lines. Split a long module by concern into siblings that share its prefix (`parse-header.ts`, `resume-form-adapter-jobs.ts`), and import from the module that defines a symbol, never through a re-export file.
+- `A.sort` sorts a copy and is stable. Do not use `toSorted`: the macOS app runs on the system WebKit, which lacks it before Safari 16.
+- Prefer named function declarations (`function ComponentName(props) {}`) over arrow function assignments (`const ComponentName = (props) => {}`) for components and standalone functions. Arrow functions are permitted only for inline functions defined inside JSX (event handlers, render callbacks passed as props).
